@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ldd3: Linux Device Drivers 3 examples updated to work with recent kernels
 
 # About
@@ -50,3 +51,6 @@ This can be done on a system with kernel headers installed using:
 ```
 ln -s /usr/src/linux-headers-`uname -r`/ linux_source_cdt
 ```
+=======
+# ldd3-master
+>>>>>>> 000190eaf6258525485485eb90b2f9bb48128109
