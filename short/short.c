@@ -21,7 +21,6 @@
  * writers.
  */
 
-#include <linux/version.h>      /* LINUX_VERSION_CODE  */
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -88,13 +87,8 @@ volatile unsigned long short_tail;
 DECLARE_WAIT_QUEUE_HEAD(short_queue);
 
 /* Set up our tasklet if we're doing that. */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
 void short_do_tasklet(unsigned long);
 DECLARE_TASKLET(short_tasklet, short_do_tasklet, 0);
-#else
-void short_do_tasklet(struct tasklet_struct *);
-DECLARE_TASKLET(short_tasklet, short_do_tasklet);
-#endif
 
 /*
  * Atomicly increment an index into short_buffer
@@ -195,7 +189,7 @@ ssize_t do_short_read (struct inode *inode, struct file *filp, char __user *buf,
  */
 ssize_t short_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
-	return do_short_read(file_dentry(filp)->d_inode, filp, buf, count, f_pos);
+	return do_short_read(filp->f_path.dentry->d_inode, filp, buf, count, f_pos);
 }
 
 
@@ -257,7 +251,7 @@ ssize_t do_short_write (struct inode *inode, struct file *filp, const char __use
 ssize_t short_write(struct file *filp, const char __user *buf, size_t count,
 		loff_t *f_pos)
 {
-	return do_short_write(file_dentry(filp)->d_inode, filp, buf, count, f_pos);
+	return do_short_write(filp->f_path.dentry->d_inode, filp, buf, count, f_pos);
 }
 
 
@@ -341,14 +335,14 @@ struct file_operations short_i_fops = {
 
 irqreturn_t short_interrupt(int irq, void *dev_id)
 {
-	struct timespec64 tv;
+	struct timeval tv;
 	int written;
 
-	ktime_get_real_ts64(&tv);
+	do_gettimeofday(&tv);
 
 	    /* Write a 16 byte record. Assume PAGE_SIZE is a multiple of 16 */
-	written = sprintf((char *)short_head,"%08u.%06lu\n",
-			(int)(tv.tv_sec % 100000000), (int)(tv.tv_nsec) /  NSEC_PER_USEC);
+	written = sprintf((char *)short_head,"%08u.%06u\n",
+			(int)(tv.tv_sec % 100000000), (int)(tv.tv_usec));
 	BUG_ON(written != 16);
 	short_incr_bp(&short_head, written);
 	wake_up_interruptible(&short_queue); /* awake any reading process */
@@ -362,9 +356,9 @@ irqreturn_t short_interrupt(int irq, void *dev_id)
 
 #define NR_TIMEVAL 512 /* length of the array of time values */
 
-struct timespec64 tv_data[NR_TIMEVAL]; /* too lazy to allocate it */
-volatile struct timespec64 *tv_head=tv_data;
-volatile struct timespec64 *tv_tail=tv_data;
+struct timeval tv_data[NR_TIMEVAL]; /* too lazy to allocate it */
+volatile struct timeval *tv_head=tv_data;
+volatile struct timeval *tv_tail=tv_data;
 
 static struct work_struct short_wq;
 
@@ -375,7 +369,7 @@ int short_wq_count = 0;
  * Increment a circular buffer pointer in a way that nobody sees
  * an intermediate value.
  */
-static inline void short_incr_tv(volatile struct timespec64 **tvp)
+static inline void short_incr_tv(volatile struct timeval **tvp)
 {
 	if (*tvp == (tv_data + NR_TIMEVAL - 1))
 		*tvp = tv_data;	 /* Wrap */
@@ -384,11 +378,8 @@ static inline void short_incr_tv(volatile struct timespec64 **tvp)
 }
 
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
+
 void short_do_tasklet (unsigned long unused)
-#else
-void short_do_tasklet (struct tasklet_struct * unused)
-#endif
 {
 	int savecount = short_wq_count, written;
 	short_wq_count = 0; /* we have already been removed from the queue */
@@ -408,9 +399,9 @@ void short_do_tasklet (struct tasklet_struct * unused)
 	 */
 
 	do {
-		written = sprintf((char *)short_head,"%08u.%06lu\n",
+		written = sprintf((char *)short_head,"%08u.%06u\n",
 				(int)(tv_tail->tv_sec % 100000000),
-				(int)(tv_tail->tv_nsec) /  NSEC_PER_USEC);
+				(int)(tv_tail->tv_usec));
 		short_incr_bp(&short_head, written);
 		short_incr_tv(&tv_tail);
 	} while (tv_tail != tv_head);
@@ -422,7 +413,7 @@ void short_do_tasklet (struct tasklet_struct * unused)
 irqreturn_t short_wq_interrupt(int irq, void *dev_id)
 {
 	/* Grab the current time information. */
-	ktime_get_real_ts64((struct timespec64 *) tv_head);
+	do_gettimeofday((struct timeval *) tv_head);
 	short_incr_tv(&tv_head);
 
 	/* Queue the bh. Don't worry about multiple enqueueing */
@@ -439,7 +430,7 @@ irqreturn_t short_wq_interrupt(int irq, void *dev_id)
 
 irqreturn_t short_tl_interrupt(int irq, void *dev_id)
 {
-	ktime_get_real_ts64((struct timespec64 *) tv_head); /* cast to stop 'volatile' warning */
+	do_gettimeofday((struct timeval *) tv_head); /* cast to stop 'volatile' warning */
 	short_incr_tv(&tv_head);
 	tasklet_schedule(&short_tasklet);
 	short_wq_count++; /* record that an interrupt arrived */
@@ -452,7 +443,7 @@ irqreturn_t short_tl_interrupt(int irq, void *dev_id)
 irqreturn_t short_sh_interrupt(int irq, void *dev_id)
 {
 	int value, written;
-	struct timespec64 tv;
+	struct timeval tv;
 
 	/* If it wasn't short, return immediately */
 	value = inb(short_base);
@@ -464,9 +455,9 @@ irqreturn_t short_sh_interrupt(int irq, void *dev_id)
 
 	/* the rest is unchanged */
 
-	ktime_get_real_ts64(&tv);
-	written = sprintf((char *)short_head,"%08u.%06lu\n",
-			(int)(tv.tv_sec % 100000000), (int)(tv.tv_nsec) / NSEC_PER_USEC);
+	do_gettimeofday(&tv);
+	written = sprintf((char *)short_head,"%08u.%06u\n",
+			(int)(tv.tv_sec % 100000000), (int)(tv.tv_usec));
 	short_incr_bp(&short_head, written);
 	wake_up_interruptible(&short_queue); /* awake any reading process */
 	return IRQ_HANDLED;
@@ -520,7 +511,7 @@ void short_selfprobe(void)
       */
 	for (i = 0; trials[i]; i++)
 		tried[i] = request_irq(trials[i], short_probing,
-				       0, "short probe", NULL);
+				0x0, "short probe", NULL);
 
 	do {
 		short_irq = 0; /* none got, yet */
@@ -630,7 +621,7 @@ int short_init(void)
 	 */
 	if (short_irq >= 0 && share > 0) {
 		result = request_irq(short_irq, short_sh_interrupt,
-				     IRQF_SHARED,"short",
+				IRQF_SHARED ,"short",
 				short_sh_interrupt);
 		if (result) {
 			printk(KERN_INFO "short: can't get assigned irq %i\n", short_irq);
@@ -644,7 +635,7 @@ int short_init(void)
 
 	if (short_irq >= 0) {
 		result = request_irq(short_irq, short_interrupt,
-				     0, "short", NULL);
+				0x0, "short", NULL);
 		if (result) {
 			printk(KERN_INFO "short: can't get assigned irq %i\n",
 					short_irq);
@@ -664,7 +655,7 @@ int short_init(void)
 		result = request_irq(short_irq,
 				tasklet ? short_tl_interrupt :
 				short_wq_interrupt,
-				0, "short-bh", NULL);
+				0x0,"short-bh", NULL);
 		if (result) {
 			printk(KERN_INFO "short-bh: can't get assigned irq %i\n",
 					short_irq);
@@ -690,8 +681,7 @@ void short_cleanup(void)
 	unregister_chrdev(major, "short");
 	if (use_mem) {
 		iounmap((void __iomem *)short_base);
-		//release_mem_region(short_base, SHORT_NR_PORTS);
-		release_mem_region(base, SHORT_NR_PORTS);
+		release_mem_region(short_base, SHORT_NR_PORTS);
 	} else {
 		release_region(short_base,SHORT_NR_PORTS);
 	}

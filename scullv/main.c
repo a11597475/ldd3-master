@@ -24,15 +24,12 @@
 #include <linux/errno.h>	/* error codes */
 #include <linux/types.h>	/* size_t */
 #include <linux/proc_fs.h>
-#include <linux/seq_file.h>
 #include <linux/fcntl.h>	/* O_ACCMODE */
-#include <linux/aio.h>
+#include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
-#include "scull-shared/scull-async.h"
 #include "scullv.h"		/* local definitions */
-#include "access_ok_version.h"
-#include "proc_ops_version.h"
+
 
 int scullv_major =   SCULLV_MAJOR;
 int scullv_devs =    SCULLV_DEVS;	/* number of bare scullv devices */
@@ -61,8 +58,7 @@ void scullv_cleanup(void);
  * The proc filesystem: function to read and entry
  */
 
-/* FIXME: Do we need this here??  It be ugly  */
-int scullv_read_procmem(struct seq_file *m, void *v)
+static int scullv_read_mem_proc_show(struct seq_file *m, void *v)
 {
 	int i, j, order, qset;
 	int limit = m->size - 80; /* Don't print more than this */
@@ -70,45 +66,46 @@ int scullv_read_procmem(struct seq_file *m, void *v)
 
 	for(i = 0; i < scullv_devs; i++) {
 		d = &scullv_devices[i];
-		if (mutex_lock_interruptible (&d->mutex))
+		if (mutex_lock_interruptible(&d->mutex))
 			return -ERESTARTSYS;
 		qset = d->qset;  /* retrieve the features of each device */
 		order = d->order;
-		seq_printf(m,"\nDevice %i: qset %i, order %i, sz %li\n",
+		seq_printf(m, "\nDevice %i: qset %i, order %i, sz %li\n",
 				i, qset, order, (long)(d->size));
 		for (; d; d = d->next) { /* scan the list */
-			seq_printf(m,"  item at %p, qset at %p\n",d,d->data);
+			seq_printf(m, "  item at %p, qset at %p\n",d,d->data);
 			if (m->count > limit)
 				goto out;
 			if (d->data && !d->next) /* dump only the last item - save space */
 				for (j = 0; j < qset; j++) {
 					if (d->data[j])
-						seq_printf(m,"    % 4i:%8p\n",j,d->data[j]);
+						seq_printf(m, "    % 4i:%8p\n",j,d->data[j]);
 					if (m->count > limit)
 						goto out;
 				}
 		}
 	  out:
-		mutex_unlock (&scullv_devices[i].mutex);
+		mutex_unlock(&scullv_devices[i].mutex);
 		if (m->count > limit)
 			break;
 	}
 	return 0;
 }
 
-static int scullv_proc_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, scullv_read_procmem, NULL);
-}
+#define DEFINE_PROC_SEQ_FILE(_name) \
+	static int _name##_proc_open(struct inode *inode, struct file *file)\
+	{\
+		return single_open(file, _name##_proc_show, NULL);\
+	}\
+	\
+	static const struct file_operations _name##_proc_fops = {\
+		.open		= _name##_proc_open,\
+		.read		= seq_read,\
+		.llseek		= seq_lseek,\
+		.release	= single_release,\
+	};
 
-static struct file_operations scullv_proc_ops = {
-	.owner = THIS_MODULE,
-	.open = scullv_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release
-};
-
+DEFINE_PROC_SEQ_FILE(scullv_read_mem)
 #endif /* SCULLV_USE_PROC */
 
 /*
@@ -208,7 +205,6 @@ ssize_t scullv_read (struct file *filp, char __user *buf, size_t count,
 }
 
 
-
 ssize_t scullv_write (struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
@@ -258,15 +254,18 @@ ssize_t scullv_write (struct file *filp, const char __user *buf, size_t count,
 	return count;
 
   nomem:
-    mutex_unlock(&dev->mutex);
+	mutex_unlock(&dev->mutex);
 	return retval;
 }
+
+
 
 /*
  * The ioctl() implementation
  */
 
-long scullv_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
+long scullv_ioctl (struct file *filp,
+                 unsigned int cmd, unsigned long arg)
 {
 
 	int err = 0, ret = 0, tmp;
@@ -282,9 +281,9 @@ long scullv_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
 	 * "write" is reversed
 	 */
 	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok_wrapper(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err =  !access_ok_wrapper(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+		err =  !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 	if (err)
 		return -EFAULT;
 
@@ -386,6 +385,23 @@ loff_t scullv_llseek (struct file *filp, loff_t off, int whence)
 	return newpos;
 }
 
+
+/*
+ * A simple asynchronous I/O implementation.
+ */
+
+struct async_work {
+	struct kiocb *iocb;
+	int result;
+	struct delayed_work work;
+};
+
+
+
+
+
+
+ 
 /*
  * Mmap *is* available, but confined in a different file
  */
@@ -401,12 +417,10 @@ struct file_operations scullv_fops = {
 	.llseek =    scullv_llseek,
 	.read =	     scullv_read,
 	.write =     scullv_write,
-	.unlocked_ioctl = scullv_ioctl,
+	.unlocked_ioctl =     scullv_ioctl,
 	.mmap =	     scullv_mmap,
 	.open =	     scullv_open,
 	.release =   scullv_release,
-	.read_iter =  scull_read_iter,
-	.write_iter = scull_write_iter,
 };
 
 int scullv_trim(struct scullv_dev *dev)
@@ -445,6 +459,7 @@ static void scullv_setup_cdev(struct scullv_dev *dev, int index)
     
 	cdev_init(&dev->cdev, &scullv_fops);
 	dev->cdev.owner = THIS_MODULE;
+	dev->cdev.ops = &scullv_fops;
 	err = cdev_add (&dev->cdev, devno, 1);
 	/* Fail gracefully if need be */
 	if (err)
@@ -488,13 +503,13 @@ int scullv_init(void)
 	for (i = 0; i < scullv_devs; i++) {
 		scullv_devices[i].order = scullv_order;
 		scullv_devices[i].qset = scullv_qset;
-		mutex_init(&scullv_devices[i].mutex);
+		mutex_init (&scullv_devices[i].mutex);
 		scullv_setup_cdev(scullv_devices + i, i);
 	}
 
 
 #ifdef SCULLV_USE_PROC /* only when available */
-	proc_create("scullvmem", 0, NULL, proc_ops_wrapper(&scullv_proc_ops,scullv_pops));
+	proc_create("scullvmem", 0, NULL, &scullv_read_mem_proc_fops);
 #endif
 	return 0; /* succeed */
 

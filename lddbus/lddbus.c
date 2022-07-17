@@ -28,13 +28,14 @@ MODULE_LICENSE("Dual BSD/GPL");
 static char *Version = "$Revision: 1.9 $";
 
 /*
- * Respond to udev events.
+ * Respond to hotplug events.
  */
-static int ldd_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int ldd_hotplug(struct device *dev, struct kobj_uevent_env *env)
 {
-	if (add_uevent_var(env, "LDDBUS_VERSION=%s", Version))
+	if(add_uevent_var(env, "LDDBUS_VERSION=%s",
+				Version)) {
 		return -ENOMEM;
-
+	}
 	return 0;
 }
 
@@ -56,6 +57,7 @@ static void ldd_bus_release(struct device *dev)
 }
 	
 struct device ldd_bus = {
+	.init_name   = "ldd0",
 	.release  = ldd_bus_release
 };
 
@@ -66,18 +68,18 @@ struct device ldd_bus = {
 struct bus_type ldd_bus_type = {
 	.name = "ldd",
 	.match = ldd_match,
-	.uevent  = ldd_uevent,
+	.uevent  = ldd_hotplug,
 };
 
 /*
  * Export a simple attribute.
  */
-static ssize_t version_show(struct bus_type *bus, char *buf)
+static ssize_t show_bus_version(struct bus_type *bus, char *buf)
 {
 	return snprintf(buf, PAGE_SIZE, "%s\n", Version);
 }
 
-static BUS_ATTR_RO(version);
+static BUS_ATTR(version, S_IRUGO, show_bus_version, NULL);
 
 
 
@@ -98,7 +100,7 @@ int register_ldd_device(struct ldd_device *ldddev)
 	ldddev->dev.bus = &ldd_bus_type;
 	ldddev->dev.parent = &ldd_bus;
 	ldddev->dev.release = ldd_dev_release;
-	dev_set_name(&ldddev->dev, ldddev->name);
+	dev_set_name(&ldddev->dev, "%s", ldddev->name);
 	return device_register(&ldddev->dev);
 }
 EXPORT_SYMBOL(register_ldd_device);
@@ -152,22 +154,13 @@ static int __init ldd_bus_init(void)
 	int ret;
 
 	ret = bus_register(&ldd_bus_type);
-	if (ret) {
-		printk(KERN_ERR "Unable to register ldd bus, failure was %d\n",ret);
+	if (ret)
 		return ret;
-	}
 	if (bus_create_file(&ldd_bus_type, &bus_attr_version))
-		printk(KERN_ERR "Unable to create version attribute\n");
-	dev_set_name(&ldd_bus,"ldd0");
+		printk(KERN_NOTICE "Unable to create version attribute\n");
 	ret = device_register(&ldd_bus);
-	if (ret) {
-		printk(KERN_ERR "Unable to register ldd0, failure was %d\n",ret);
-		goto out_fail;
-	}
-	return 0;
-
-	out_fail:
-	bus_unregister(&ldd_bus_type);
+	if (ret)
+		printk(KERN_NOTICE "Unable to register ldd0\n");
 	return ret;
 }
 

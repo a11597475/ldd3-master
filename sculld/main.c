@@ -24,13 +24,11 @@
 #include <linux/errno.h>	/* error codes */
 #include <linux/types.h>	/* size_t */
 #include <linux/proc_fs.h>
-#include <linux/seq_file.h>
 #include <linux/fcntl.h>	/* O_ACCMODE */
-#include <linux/aio.h>
+#include <linux/seq_file.h>
 #include <linux/uaccess.h>
-#include "scull-shared/scull-async.h"
 #include "sculld.h"		/* local definitions */
-#include "access_ok_version.h"
+
 
 int sculld_major =   SCULLD_MAJOR;
 int sculld_devs =    SCULLD_DEVS;	/* number of bare sculld devices */
@@ -68,8 +66,7 @@ static struct ldd_driver sculld_driver = {
  * The proc filesystem: function to read and entry
  */
 
-/* FIXME: Do we need this here??  It be ugly  */
-int sculld_read_procmem(struct seq_file *m, void *v)
+static int sculld_read_mem_proc_show(struct seq_file *m, void *v)
 {
 	int i, j, order, qset;
 	int limit = m->size - 80; /* Don't print more than this */
@@ -77,45 +74,46 @@ int sculld_read_procmem(struct seq_file *m, void *v)
 
 	for(i = 0; i < sculld_devs; i++) {
 		d = &sculld_devices[i];
-		if (mutex_lock_interruptible (&d->mutex))
+		if (mutex_lock_interruptible(&d->mutex))
 			return -ERESTARTSYS;
 		qset = d->qset;  /* retrieve the features of each device */
 		order = d->order;
-		seq_printf(m,"\nDevice %i: qset %i, order %i, sz %li\n",
+		seq_printf(m, "\nDevice %i: qset %i, order %i, sz %li\n",
 				i, qset, order, (long)(d->size));
 		for (; d; d = d->next) { /* scan the list */
-			seq_printf(m,"  item at %p, qset at %p\n",d,d->data);
+			seq_printf(m, "  item at %p, qset at %p\n",d,d->data);
 			if (m->count > limit)
 				goto out;
 			if (d->data && !d->next) /* dump only the last item - save space */
 				for (j = 0; j < qset; j++) {
 					if (d->data[j])
-						seq_printf(m,"    % 4i:%8p\n",j,d->data[j]);
+						seq_printf(m, "    % 4i:%8p\n",j,d->data[j]);
 					if (m->count > limit)
 						goto out;
 				}
 		}
 	  out:
-		mutex_unlock (&sculld_devices[i].mutex);
+		mutex_unlock(&sculld_devices[i].mutex);
 		if (m->count > limit)
 			break;
 	}
 	return 0;
 }
 
-static int sculld_proc_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, sculld_read_procmem, NULL);
-}
+#define DEFINE_PROC_SEQ_FILE(_name) \
+	static int _name##_proc_open(struct inode *inode, struct file *file)\
+	{\
+		return single_open(file, _name##_proc_show, NULL);\
+	}\
+	\
+	static const struct file_operations _name##_proc_fops = {\
+		.open		= _name##_proc_open,\
+		.read		= seq_read,\
+		.llseek		= seq_lseek,\
+		.release	= single_release,\
+	};
 
-static struct file_operations sculld_proc_ops = {
-	.owner = THIS_MODULE,
-	.open = sculld_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release
-};
-
+DEFINE_PROC_SEQ_FILE(sculld_read_mem)
 #endif /* SCULLD_USE_PROC */
 
 /*
@@ -215,7 +213,6 @@ ssize_t sculld_read (struct file *filp, char __user *buf, size_t count,
 }
 
 
-
 ssize_t sculld_write (struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
@@ -270,11 +267,13 @@ ssize_t sculld_write (struct file *filp, const char __user *buf, size_t count,
 	return retval;
 }
 
+
 /*
  * The ioctl() implementation
  */
 
-long sculld_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
+long sculld_ioctl (struct file *filp,
+                 unsigned int cmd, unsigned long arg)
 {
 
 	int err = 0, ret = 0, tmp;
@@ -290,9 +289,9 @@ long sculld_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
 	 * "write" is reversed
 	 */
 	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok_wrapper(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err =  !access_ok_wrapper(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+		err =  !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 	if (err)
 		return -EFAULT;
 
@@ -394,6 +393,17 @@ loff_t sculld_llseek (struct file *filp, loff_t off, int whence)
 	return newpos;
 }
 
+
+/*
+ * A simple asynchronous I/O implementation.
+ */
+
+struct async_work {
+	struct kiocb *iocb;
+	int result;
+	struct delayed_work work;
+};
+
  
 /*
  * Mmap *is* available, but confined in a different file
@@ -410,12 +420,10 @@ struct file_operations sculld_fops = {
 	.llseek =    sculld_llseek,
 	.read =	     sculld_read,
 	.write =     sculld_write,
-	.unlocked_ioctl = sculld_ioctl,
+	.unlocked_ioctl =     sculld_ioctl,
 	.mmap =	     sculld_mmap,
 	.open =	     sculld_open,
 	.release =   sculld_release,
-	.read_iter =  scull_read_iter,
-	.write_iter = scull_write_iter,
 };
 
 int sculld_trim(struct sculld_dev *dev)
@@ -455,13 +463,15 @@ static void sculld_setup_cdev(struct sculld_dev *dev, int index)
     
 	cdev_init(&dev->cdev, &sculld_fops);
 	dev->cdev.owner = THIS_MODULE;
+	dev->cdev.ops = &sculld_fops;
 	err = cdev_add (&dev->cdev, devno, 1);
 	/* Fail gracefully if need be */
 	if (err)
 		printk(KERN_NOTICE "Error %d adding scull%d", err, index);
 }
 
-static ssize_t sculld_show_dev(struct device *ddev, struct device_attribute *attr, char *buf)
+static ssize_t sculld_show_dev(struct device *ddev, struct device_attribute *attr,
+				char *buf)
 {
 	struct sculld_dev *dev = dev_get_drvdata(ddev);
 
@@ -472,7 +482,7 @@ static DEVICE_ATTR(dev, S_IRUGO, sculld_show_dev, NULL);
 
 static void sculld_register_dev(struct sculld_dev *dev, int index)
 {
-	snprintf(dev->devname, sizeof(dev->devname), "sculld%d", index);
+	sprintf(dev->devname, "sculld%d", index);
 	dev->ldev.name = dev->devname;
 	dev->ldev.driver = &sculld_driver;
 	dev_set_drvdata(&dev->ldev.dev, dev);
@@ -520,14 +530,14 @@ int sculld_init(void)
 	for (i = 0; i < sculld_devs; i++) {
 		sculld_devices[i].order = sculld_order;
 		sculld_devices[i].qset = sculld_qset;
-		mutex_init(&sculld_devices[i].mutex);
+		mutex_init (&sculld_devices[i].mutex);
 		sculld_setup_cdev(sculld_devices + i, i);
 		sculld_register_dev(sculld_devices + i, i);
 	}
 
 
 #ifdef SCULLD_USE_PROC /* only when available */
-	proc_create("sculldmem", 0, NULL, &sculld_proc_ops);
+	proc_create("sculldmem", 0, NULL, &sculld_read_mem_proc_fops);
 #endif
 	return 0; /* succeed */
 

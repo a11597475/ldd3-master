@@ -21,7 +21,7 @@
 #include <linux/serial.h>
 #include <linux/serial_core.h>
 #include <linux/module.h>
-#include <linux/version.h>
+
 
 #define DRIVER_AUTHOR "Greg Kroah-Hartman <greg@kroah.com>"
 #define DRIVER_DESC "Tiny serial driver"
@@ -42,7 +42,14 @@ MODULE_LICENSE("GPL");
 
 #define MY_NAME			TINY_SERIAL_NAME
 
-static struct timer_list *timer;
+struct port_data {
+	struct timer_list timer;
+	struct uart_port* port;
+};
+
+struct port_data tiny_port_data = {
+	.port = NULL,
+};
 
 static void tiny_stop_tx(struct uart_port *port)
 {
@@ -92,33 +99,28 @@ static void tiny_start_tx(struct uart_port *port)
 {
 }
 
-static void tiny_timer(unsigned long data)
+static void tiny_timer(struct timer_list* arg)
 {
 	struct uart_port *port;
-	struct tty_struct *tty;
-	struct tty_port *tty_port;
+	struct tty_port *tport;
 
 
-	port = (struct uart_port *)data;
+	port = tiny_port_data.port;
 	if (!port)
 		return;
 	if (!port->state)
 		return;
-	tty = port->state->port.tty;
-	if (!tty)
-		return;
-
-	tty_port = tty->port;
+	tport = &port->state->port;
 
 	/* add one character to the tty port */
 	/* this doesn't actually push the data through unless tty->low_latency is set */
-	tty_insert_flip_char(tty_port, TINY_DATA_CHARACTER, 0);
+	tty_insert_flip_char(tport, TINY_DATA_CHARACTER, 0);
 
-	tty_flip_buffer_push(tty_port);
+	tty_flip_buffer_push(tport);
 
 	/* resubmit the timer again */
-	timer->expires = jiffies + DELAY_TIME;
-	add_timer(timer);
+	tiny_port_data.timer.expires = jiffies + DELAY_TIME;
+	add_timer(&tiny_port_data.timer);
 
 	/* see if we have any data to transmit */
 	tiny_tx_chars(port);
@@ -197,20 +199,11 @@ static int tiny_startup(struct uart_port *port)
 	/* do any hardware initialization needed here */
 
 	/* create our timer and submit it */
-	if (!timer) {
-		timer = kmalloc(sizeof(*timer), GFP_KERNEL);
-		if (!timer)
-			return -ENOMEM;
-	}
-    #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
-        timer->data = (unsigned long)port;
-        timer->function = tiny_timer;
-    #else
-        timer_setup(timer, (void *) tiny_timer, (unsigned long) port);
-        timer->function = (void *) tiny_timer;
-    #endif
-	timer->expires = jiffies + DELAY_TIME;
-	add_timer(timer);
+	tiny_port_data.port = port;
+	timer_setup(&tiny_port_data.timer, tiny_timer, 0);
+
+	tiny_port_data.timer.expires = jiffies + DELAY_TIME;
+	add_timer(&tiny_port_data.timer);
 	return 0;
 }
 
@@ -220,7 +213,7 @@ static void tiny_shutdown(struct uart_port *port)
 	/* Do any hardware specific stuff here */
 
 	/* shut down our timer */
-	del_timer(timer);
+	del_timer(&tiny_port_data.timer);
 }
 
 static const char *tiny_type(struct uart_port *port)

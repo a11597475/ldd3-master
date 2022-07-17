@@ -9,14 +9,13 @@ else
   DEBFLAGS = -O2
 endif
 
-LDDINC=$(PWD)/../include
 EXTRA_CFLAGS += $(DEBFLAGS) -I$(LDDINC)
 
 TARGET = scullv
 
 ifneq ($(KERNELRELEASE),)
 
-scullv-objs := main.o mmap.o scull-shared/scull-async.o
+scullv-objs := main.o mmap.o
 
 obj-m	:= scullv.o
 
@@ -26,7 +25,7 @@ KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD       := $(shell pwd)
 
 modules:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) LDDINC=$(PWD) modules
 
 endif
 
@@ -36,7 +35,7 @@ install:
 	install -c $(TARGET).o $(INSTALLDIR)
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions *.mod modules.order *.symvers scull-shared/scull-async.o
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions Module.symvers modules.order
 
 
 depend .depend dep:

@@ -24,15 +24,11 @@
 #include <linux/errno.h>	/* error codes */
 #include <linux/types.h>	/* size_t */
 #include <linux/proc_fs.h>
-#include <linux/seq_file.h>
 #include <linux/fcntl.h>	/* O_ACCMODE */
-#include <linux/aio.h>
+#include <linux/seq_file.h>
 #include <linux/uaccess.h>
-#include <linux/uio.h>	/* ivo_iter* */
 #include "scullp.h"		/* local definitions */
-#include "scull-shared/scull-async.h"
-#include "access_ok_version.h"
-#include "proc_ops_version.h"
+
 
 int scullp_major =   SCULLP_MAJOR;
 int scullp_devs =    SCULLP_DEVS;	/* number of bare scullp devices */
@@ -61,8 +57,7 @@ void scullp_cleanup(void);
  * The proc filesystem: function to read and entry
  */
 
-/* FIXME: Do we need this here??  It be ugly  */
-int scullp_read_procmem(struct seq_file *m, void *v)
+static int scullp_read_mem_proc_show(struct seq_file *m, void *v)
 {
 	int i, j, order, qset;
 	int limit = m->size - 80; /* Don't print more than this */
@@ -70,7 +65,7 @@ int scullp_read_procmem(struct seq_file *m, void *v)
 
 	for(i = 0; i < scullp_devs; i++) {
 		d = &scullp_devices[i];
-		if (mutex_lock_interruptible (&d->mutex))
+		if (mutex_lock_interruptible(&d->mutex))
 			return -ERESTARTSYS;
 		qset = d->qset;  /* retrieve the features of each device */
 		order = d->order;
@@ -89,26 +84,27 @@ int scullp_read_procmem(struct seq_file *m, void *v)
 				}
 		}
 	  out:
-		mutex_unlock (&scullp_devices[i].mutex);
+		mutex_unlock(&scullp_devices[i].mutex);
 		if (m->count > limit)
 			break;
 	}
 	return 0;
 }
 
-static int scullp_proc_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, scullp_read_procmem, NULL);
-}
+#define DEFINE_PROC_SEQ_FILE(_name) \
+	static int _name##_proc_open(struct inode *inode, struct file *file)\
+	{\
+		return single_open(file, _name##_proc_show, NULL);\
+	}\
+	\
+	static const struct file_operations _name##_proc_fops = {\
+		.open		= _name##_proc_open,\
+		.read		= seq_read,\
+		.llseek		= seq_lseek,\
+		.release	= single_release,\
+	};
 
-static struct file_operations scullp_proc_ops = {
-	.owner = THIS_MODULE,
-	.open = scullp_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release
-};
-
+DEFINE_PROC_SEQ_FILE(scullp_read_mem)
 #endif /* SCULLP_USE_PROC */
 
 /*
@@ -263,11 +259,14 @@ ssize_t scullp_write (struct file *filp, const char __user *buf, size_t count,
 	return retval;
 }
 
+
+
 /*
  * The ioctl() implementation
  */
 
-long scullp_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
+long scullp_ioctl (struct file *filp,
+                 unsigned int cmd, unsigned long arg)
 {
 
 	int err = 0, ret = 0, tmp;
@@ -283,9 +282,9 @@ long scullp_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
 	 * "write" is reversed
 	 */
 	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok_wrapper(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err =  !access_ok_wrapper(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+		err =  !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 	if (err)
 		return -EFAULT;
 
@@ -387,6 +386,20 @@ loff_t scullp_llseek (struct file *filp, loff_t off, int whence)
 	return newpos;
 }
 
+
+/*
+ * A simple asynchronous I/O implementation.
+ */
+
+struct async_work {
+	struct kiocb *iocb;
+	int result;
+	struct delayed_work work;
+};
+
+
+
+
  
 /*
  * Mmap *is* available, but confined in a different file
@@ -403,12 +416,10 @@ struct file_operations scullp_fops = {
 	.llseek =    scullp_llseek,
 	.read =	     scullp_read,
 	.write =     scullp_write,
-	.unlocked_ioctl = scullp_ioctl,
+	.unlocked_ioctl =     scullp_ioctl,
 	.mmap =	     scullp_mmap,
 	.open =	     scullp_open,
 	.release =   scullp_release,
-	.read_iter =  scull_read_iter,
-	.write_iter = scull_write_iter,
 };
 
 int scullp_trim(struct scullp_dev *dev)
@@ -492,13 +503,13 @@ int scullp_init(void)
 	for (i = 0; i < scullp_devs; i++) {
 		scullp_devices[i].order = scullp_order;
 		scullp_devices[i].qset = scullp_qset;
-		mutex_init(&scullp_devices[i].mutex);
+		mutex_init (&scullp_devices[i].mutex);
 		scullp_setup_cdev(scullp_devices + i, i);
 	}
 
 
 #ifdef SCULLP_USE_PROC /* only when available */
-	proc_create("scullpmem", 0, NULL, proc_ops_wrapper(&scullp_proc_ops, scullp_pops));
+	proc_create("scullpmem", 0, NULL, &scullp_read_mem_proc_fops);
 #endif
 	return 0; /* succeed */
 

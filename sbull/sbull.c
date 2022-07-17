@@ -2,14 +2,6 @@
  * Sample disk driver, from the beginning.
  */
 
-#include <linux/version.h> 	/* LINUX_VERSION_CODE  */
-#include <linux/blk-mq.h>	
-/* https://olegkutkov.me/2020/02/10/linux-block-device-driver/
-   https://prog.world/linux-kernel-5-0-we-write-simple-block-device-under-blk-mq/           
-   blk-mq and kernels >= 5.0
-*/
-
-
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -63,7 +55,8 @@ module_param(request_mode, int, 0);
  * We can tweak our hardware sector size, but the kernel talks to us
  * in terms of small sectors, always.
  */
-#define KERNEL_SECTOR_SIZE	512
+#define KERNEL_SECTOR_SHIFT	9
+#define KERNEL_SECTOR_SIZE	(1<<KERNEL_SECTOR_SHIFT)
 
 /*
  * After this much idle time, the driver will simulate a media change.
@@ -79,7 +72,6 @@ struct sbull_dev {
         short users;                    /* How many users */
         short media_change;             /* Flag a media change? */
         spinlock_t lock;                /* For mutual exclusion */
-	struct blk_mq_tag_set tag_set;	/* tag_set added */
         struct request_queue *queue;    /* The device request queue */
         struct gendisk *gd;             /* The gendisk structure */
         struct timer_list timer;        /* For simulated media changes */
@@ -87,28 +79,13 @@ struct sbull_dev {
 
 static struct sbull_dev *Devices = NULL;
 
-/**
-* See https://github.com/openzfs/zfs/pull/10187/
-*/
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-static inline struct request_queue *
-blk_generic_alloc_queue(make_request_fn make_request, int node_id)
-#else
-static inline struct request_queue *
-blk_generic_alloc_queue(int node_id)
-#endif
+static int bytes_to_sectors_checked(unsigned long bytes)
 {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0))
-	struct request_queue *q = blk_alloc_queue(GFP_KERNEL);
-	if (q != NULL)
-		blk_queue_make_request(q, make_request);
-
-	return (q);
-#elif (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-	return (blk_alloc_queue(make_request, node_id));
-#else
-	return (blk_alloc_queue(node_id));
-#endif
+	if( bytes % KERNEL_SECTOR_SIZE )
+	{
+		printk("***************WhatTheFuck***********************\n");
+	}
+	return bytes / KERNEL_SECTOR_SIZE;
 }
 
 /*
@@ -133,41 +110,31 @@ static void sbull_transfer(struct sbull_dev *dev, unsigned long sector,
 /*
  * The simple form of the request function.
  */
-//static void sbull_request(struct request_queue *q)
-static blk_status_t sbull_request(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data* bd)   /* For blk-mq */
+static void sbull_request(struct request_queue *q)
 {
-	struct request *req = bd->rq;
-	struct sbull_dev *dev = req->rq_disk->private_data;
-        struct bio_vec bvec;
-        struct req_iterator iter;
-        sector_t pos_sector = blk_rq_pos(req);
-	void	*buffer;
-	blk_status_t  ret;
+	struct request *req;
+	int ret;
 
-	blk_mq_start_request (req);
-
-	if (blk_rq_is_passthrough(req)) {
-		printk (KERN_NOTICE "Skip non-fs request\n");
-                ret = BLK_STS_IOERR;  //-EIO
+	req = blk_fetch_request(q);
+	while (req) {
+		struct sbull_dev *dev = req->rq_disk->private_data;
+		if (blk_rq_is_passthrough(req)) {
+			printk (KERN_NOTICE "Skip non-fs request\n");
+			ret = -EIO;
 			goto done;
+		}
+		printk (KERN_NOTICE "Req dev %u dir %d sec %ld, nr %d\n",
+			(unsigned)(dev - Devices), rq_data_dir(req),
+			blk_rq_pos(req), blk_rq_cur_sectors(req));
+		sbull_transfer(dev, blk_rq_pos(req), blk_rq_cur_sectors(req),
+				bio_data(req->bio), rq_data_dir(req));
+		ret = 0;
+	done:
+		if(!__blk_end_request_cur(req, ret)){
+			req = blk_fetch_request(q);
+		}
 	}
-	rq_for_each_segment(bvec, req, iter)
-	{
-		size_t num_sector = blk_rq_cur_sectors(req);
-		printk (KERN_NOTICE "Req dev %u dir %d sec %lld, nr %ld\n",
-                        (unsigned)(dev - Devices), rq_data_dir(req),
-                        pos_sector, num_sector);
-		buffer = page_address(bvec.bv_page) + bvec.bv_offset;
-		sbull_transfer(dev, pos_sector, num_sector,
-				buffer, rq_data_dir(req) == WRITE);
-		pos_sector += num_sector;
-	}
-	ret = BLK_STS_OK;
-done:
-	blk_mq_end_request (req, ret);
-	return ret;
 }
-
 
 /*
  * Transfer a single BIO.
@@ -180,18 +147,15 @@ static int sbull_xfer_bio(struct sbull_dev *dev, struct bio *bio)
 
 	/* Do each segment independently. */
 	bio_for_each_segment(bvec, bio, iter) {
-		//char *buffer = __bio_kmap_atomic(bio, i, KM_USER0);
 		char *buffer = kmap_atomic(bvec.bv_page) + bvec.bv_offset;
-		//sbull_transfer(dev, sector, bio_cur_bytes(bio) >> 9,
-		sbull_transfer(dev, sector, (bio_cur_bytes(bio) / KERNEL_SECTOR_SIZE),
+		sbull_transfer(dev, sector,bytes_to_sectors_checked(bio_cur_bytes(bio)),
 				buffer, bio_data_dir(bio) == WRITE);
-		//sector += bio_cur_bytes(bio) >> 9;
-		sector += (bio_cur_bytes(bio) / KERNEL_SECTOR_SIZE);
-		//__bio_kunmap_atomic(buffer, KM_USER0);
+		sector += (bytes_to_sectors_checked(bio_cur_bytes(bio)));
 		kunmap_atomic(buffer);
 	}
 	return 0; /* Always "succeed" */
 }
+
 
 /*
  * Transfer a full request.
@@ -203,7 +167,6 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
     
 	__rq_for_each_bio(bio, req) {
 		sbull_xfer_bio(dev, bio);
-		//nsect += bio->bi_size/KERNEL_SECTOR_SIZE;
 		nsect += bio->bi_iter.bi_size/KERNEL_SECTOR_SIZE;
 	}
 	return nsect;
@@ -214,32 +177,23 @@ static int sbull_xfer_request(struct sbull_dev *dev, struct request *req)
 /*
  * Smarter request function that "handles clustering".
  */
-//static void sbull_full_request(struct request_queue *q)
-static blk_status_t sbull_full_request(struct blk_mq_hw_ctx * hctx, const struct blk_mq_queue_data * bd)
+static void sbull_full_request(struct request_queue *q)
 {
-	struct request *req = bd->rq;
-	int sectors_xferred;
-	//struct sbull_dev *dev = q->queuedata;
-	struct sbull_dev *dev = req->q->queuedata;
-	blk_status_t  ret;
+	struct request *req;
+	struct sbull_dev *dev = q->queuedata;
+	int ret;
 
-	blk_mq_start_request (req);
-	//while ((req = blk_fetch_request(q)) != NULL) {
-		//if (req->cmd_type != REQ_TYPE_FS) {
+	while ((req = blk_fetch_request(q)) != NULL) {
 		if (blk_rq_is_passthrough(req)) {
 			printk (KERN_NOTICE "Skip non-fs request\n");
-			//__blk_end_request(req, -EIO, blk_rq_cur_bytes(req));
-			ret = BLK_STS_IOERR; //-EIO;
-			//continue;
+			ret = -EIO;
 			goto done;
 		}
-		sectors_xferred = sbull_xfer_request(dev, req);
-		ret = BLK_STS_OK; 
+		sbull_xfer_request(dev, req);
+		ret = 0;
 	done:
-		//__blk_end_request(req, 0, sectors_xferred);
-		blk_mq_end_request (req, ret);
-	//}
-	return ret;
+		__blk_end_request_all(req, ret);
+	}
 }
 
 
@@ -247,15 +201,9 @@ static blk_status_t sbull_full_request(struct blk_mq_hw_ctx * hctx, const struct
 /*
  * The direct make request version.
  */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-//static void sbull_make_request(struct request_queue *q, struct bio *bio)
 static blk_qc_t sbull_make_request(struct request_queue *q, struct bio *bio)
-#else
-static blk_qc_t sbull_make_request(struct bio *bio)
-#endif
 {
-	//struct sbull_dev *dev = q->queuedata;
-	struct sbull_dev *dev = bio->bi_disk->private_data;
+	struct sbull_dev *dev = q->queuedata;
 	int status;
 
 	status = sbull_xfer_bio(dev, bio);
@@ -274,27 +222,9 @@ static int sbull_open(struct block_device *bdev, fmode_t mode)
 	struct sbull_dev *dev = bdev->bd_disk->private_data;
 
 	del_timer_sync(&dev->timer);
-	//filp->private_data = dev;
 	spin_lock(&dev->lock);
 	if (! dev->users) 
-	{
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
 		check_disk_change(bdev);
-#else
-                /* For newer kernels (as of 5.10), bdev_check_media_change()
-                 * is used, in favor of check_disk_change(),
-                 * with the modification that invalidation
-                 * is no longer forced. */
-
-                if(bdev_check_media_change(bdev))
-                {
-                        struct gendisk *gd = bdev->bd_disk;
-                        const struct block_device_operations *bdo = gd->fops;
-                        if (bdo && bdo->revalidate_disk)
-                                bdo->revalidate_disk(gd);
-                }
-#endif
-	}
 	dev->users++;
 	spin_unlock(&dev->lock);
 	return 0;
@@ -312,6 +242,7 @@ static void sbull_release(struct gendisk *disk, fmode_t mode)
 		add_timer(&dev->timer);
 	}
 	spin_unlock(&dev->lock);
+
 }
 
 /*
@@ -343,15 +274,9 @@ int sbull_revalidate(struct gendisk *gd)
  * The "invalidate" function runs out of the device timer; it sets
  * a flag to simulate the removal of the media.
  */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)) && !defined(timer_setup)
-void sbull_invalidate(unsigned long ldev)
+void sbull_invalidate(struct timer_list* arg)
 {
-        struct sbull_dev *dev = (struct sbull_dev *) ldev;
-#else
-void sbull_invalidate(struct timer_list * ldev)
-{
-        struct sbull_dev *dev = from_timer(dev, ldev, timer);
-#endif
+	struct sbull_dev *dev = from_timer(dev, arg, timer);
 
 	spin_lock(&dev->lock);
 	if (dev->users || !dev->data) 
@@ -365,7 +290,8 @@ void sbull_invalidate(struct timer_list * ldev)
  * The ioctl() implementation
  */
 
-int sbull_ioctl (struct block_device *bdev, fmode_t mode,
+int sbull_ioctl (struct block_device *bdev,
+		 fmode_t mode,
                  unsigned int cmd, unsigned long arg)
 {
 	long size;
@@ -402,21 +328,9 @@ static struct block_device_operations sbull_ops = {
 	.owner           = THIS_MODULE,
 	.open 	         = sbull_open,
 	.release 	 = sbull_release,
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-	.media_changed   = sbull_media_changed,  // DEPRECATED in v5.9
-#else
-	.submit_bio      = sbull_make_request,
-#endif
+	.media_changed   = sbull_media_changed,
 	.revalidate_disk = sbull_revalidate,
 	.ioctl	         = sbull_ioctl
-};
-
-static struct blk_mq_ops mq_ops_simple = {
-    .queue_rq = sbull_request,
-};
-
-static struct blk_mq_ops mq_ops_full = {
-    .queue_rq = sbull_full_request,
 };
 
 
@@ -440,15 +354,7 @@ static void setup_device(struct sbull_dev *dev, int which)
 	/*
 	 * The timer which "invalidates" the device.
 	 */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)) && !defined(timer_setup)
-	init_timer(&dev->timer);
-	dev->timer.data = (unsigned long) dev;
-	dev->timer.function = sbull_invalidate;
-#else
-        timer_setup(&dev->timer, sbull_invalidate, 0);
-#endif
-
-
+	timer_setup(&dev->timer, sbull_invalidate, 0);
 	
 	/*
 	 * The I/O queue, depending on whether we are using our own
@@ -456,18 +362,14 @@ static void setup_device(struct sbull_dev *dev, int which)
 	 */
 	switch (request_mode) {
 	    case RM_NOQUEUE:
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-		dev->queue =  blk_generic_alloc_queue(sbull_make_request, NUMA_NO_NODE);
-#else
-		dev->queue =  blk_generic_alloc_queue(NUMA_NO_NODE);
-#endif
+		dev->queue = blk_alloc_queue(GFP_KERNEL);
 		if (dev->queue == NULL)
 			goto out_vfree;
+		blk_queue_make_request(dev->queue, sbull_make_request);
 		break;
 
 	    case RM_FULL:
-		//dev->queue = blk_init_queue(sbull_full_request, &dev->lock);
-		dev->queue = blk_mq_init_sq_queue(&dev->tag_set, &mq_ops_full, 128, BLK_MQ_F_SHOULD_MERGE);
+		dev->queue = blk_init_queue(sbull_full_request, &dev->lock);
 		if (dev->queue == NULL)
 			goto out_vfree;
 		break;
@@ -477,8 +379,7 @@ static void setup_device(struct sbull_dev *dev, int which)
         	/* fall into.. */
 	
 	    case RM_SIMPLE:
-		//dev->queue = blk_init_queue(sbull_request, &dev->lock);
-		dev->queue = blk_mq_init_sq_queue(&dev->tag_set, &mq_ops_simple, 128, BLK_MQ_F_SHOULD_MERGE);
+		dev->queue = blk_init_queue(sbull_request, &dev->lock);
 		if (dev->queue == NULL)
 			goto out_vfree;
 		break;
@@ -551,7 +452,6 @@ static void sbull_exit(void)
 		}
 		if (dev->queue) {
 			if (request_mode == RM_NOQUEUE)
-				//kobject_put (&dev->queue->kobj);
 				blk_put_queue(dev->queue);
 			else
 				blk_cleanup_queue(dev->queue);

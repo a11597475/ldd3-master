@@ -24,17 +24,13 @@
 #include <linux/errno.h>	/* error codes */
 #include <linux/types.h>	/* size_t */
 #include <linux/proc_fs.h>
-#include <linux/seq_file.h>
 #include <linux/fcntl.h>	/* O_ACCMODE */
 #include <linux/aio.h>
+#include <linux/uio.h>
+#include <linux/seq_file.h>
 #include <linux/uaccess.h>
-#include <linux/uio.h>		/* struct iovec */
-#include <linux/version.h>
-#include <linux/mutex.h>
-#include "scull-shared/scull-async.h"
 #include "scullc.h"		/* local definitions */
-#include "access_ok_version.h"
-#include "proc_ops_version.h"
+
 
 int scullc_major =   SCULLC_MAJOR;
 int scullc_devs =    SCULLC_DEVS;	/* number of bare scullc devices */
@@ -65,8 +61,7 @@ struct kmem_cache *scullc_cache;
  * The proc filesystem: function to read and entry
  */
 
-/* FIXME: Do we need this here??  It be ugly  */
-int scullc_read_procmem(struct seq_file *m, void *v)
+static int scullc_read_mem_proc_show(struct seq_file *m, void *v)
 {
 	int i, j, quantum, qset;
 	int limit = m->size - 80; /* Don't print more than this */
@@ -74,7 +69,7 @@ int scullc_read_procmem(struct seq_file *m, void *v)
 
 	for(i = 0; i < scullc_devs; i++) {
 		d = &scullc_devices[i];
-		if (mutex_lock_interruptible (&d->lock))
+		if (mutex_lock_interruptible(&d->mutex))
 			return -ERESTARTSYS;
 		qset = d->qset;  /* retrieve the features of each device */
 		quantum=d->quantum;
@@ -93,26 +88,27 @@ int scullc_read_procmem(struct seq_file *m, void *v)
 				}
 		}
 	  out:
-		mutex_unlock (&scullc_devices[i].lock);
+		mutex_unlock(&scullc_devices[i].mutex);
 		if (m->count > limit)
 			break;
 	}
 	return 0;
 }
 
-static int scullc_proc_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, scullc_read_procmem, NULL);
-}
+#define DEFINE_PROC_SEQ_FILE(_name) \
+	static int _name##_proc_open(struct inode *inode, struct file *file)\
+	{\
+		return single_open(file, _name##_proc_show, NULL);\
+	}\
+	\
+	static const struct file_operations _name##_proc_fops = {\
+		.open		= _name##_proc_open,\
+		.read		= seq_read,\
+		.llseek		= seq_lseek,\
+		.release	= single_release,\
+	};
 
-static struct file_operations scullc_proc_ops = {
-	.owner = THIS_MODULE,
-	.open = scullc_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release
-};
-
+DEFINE_PROC_SEQ_FILE(scullc_read_mem)
 #endif /* SCULLC_USE_PROC */
 
 /*
@@ -128,10 +124,10 @@ int scullc_open (struct inode *inode, struct file *filp)
 
     	/* now trim to 0 the length of the device if open was write-only */
 	if ( (filp->f_flags & O_ACCMODE) == O_WRONLY) {
-		if (mutex_lock_interruptible (&dev->lock))
+		if (mutex_lock_interruptible(&dev->mutex))
 			return -ERESTARTSYS;
 		scullc_trim(dev); /* ignore errors */
-		mutex_unlock (&dev->lock);
+		mutex_unlock(&dev->mutex);
 	}
 
 	/* and use filp->private_data to point to the device data */
@@ -165,8 +161,8 @@ struct scullc_dev *scullc_follow(struct scullc_dev *dev, int n)
  * Data management: read and write
  */
 
-ssize_t scullc_read (struct file *filp, char __user *buf, size_t count,
-                loff_t *f_pos)
+ssize_t scullc_do_read (struct file *filp, char __user *buf, size_t count,
+                loff_t *f_pos, int aio)
 {
 	struct scullc_dev *dev = filp->private_data; /* the first listitem */
 	struct scullc_dev *dptr;
@@ -176,7 +172,7 @@ ssize_t scullc_read (struct file *filp, char __user *buf, size_t count,
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = 0;
 
-	if (mutex_lock_interruptible (&dev->lock))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 	if (*f_pos > dev->size) 
 		goto nothing;
@@ -197,24 +193,36 @@ ssize_t scullc_read (struct file *filp, char __user *buf, size_t count,
 	if (count > quantum - q_pos)
 		count = quantum - q_pos; /* read only up to the end of this quantum */
 
-	if (copy_to_user (buf, dptr->data[s_pos]+q_pos, count)) {
-		retval = -EFAULT;
-		goto nothing;
+	if (aio) {
+		if (memcpy (buf, dptr->data[s_pos]+q_pos, count)) {
+			retval = -EFAULT;
+			goto nothing;
+		}
+	} else {
+		if (copy_to_user (buf, dptr->data[s_pos]+q_pos, count)) {
+			retval = -EFAULT;
+			goto nothing;
+		}
 	}
-	mutex_unlock (&dev->lock);
+	mutex_unlock(&dev->mutex);
 
 	*f_pos += count;
 	return count;
 
   nothing:
-	mutex_unlock (&dev->lock);
+	mutex_unlock(&dev->mutex);
 	return retval;
 }
 
-
-
-ssize_t scullc_write (struct file *filp, const char __user *buf, size_t count,
+ssize_t scullc_read (struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
+{
+	return scullc_do_read(filp, buf, count, f_pos, 0);
+}
+
+
+ssize_t scullc_do_write (struct file *filp, const char __user *buf, size_t count,
+                loff_t *f_pos, int aio)
 {
 	struct scullc_dev *dev = filp->private_data;
 	struct scullc_dev *dptr;
@@ -224,7 +232,7 @@ ssize_t scullc_write (struct file *filp, const char __user *buf, size_t count,
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = -ENOMEM; /* our most likely error */
 
-	if (mutex_lock_interruptible (&dev->lock))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 
 	/* find listitem, qset index and offset in the quantum */
@@ -249,28 +257,43 @@ ssize_t scullc_write (struct file *filp, const char __user *buf, size_t count,
 	}
 	if (count > quantum - q_pos)
 		count = quantum - q_pos; /* write only up to the end of this quantum */
-	if (copy_from_user (dptr->data[s_pos]+q_pos, buf, count)) {
-		retval = -EFAULT;
-		goto nomem;
+	if (aio) {
+		if (memcpy (dptr->data[s_pos]+q_pos, buf, count)) {
+			retval = -EFAULT;
+			goto nomem;
+		}
+	} else {
+		if (copy_from_user (dptr->data[s_pos]+q_pos, buf, count)) {
+			retval = -EFAULT;
+			goto nomem;
+		}
 	}
 	*f_pos += count;
  
     	/* update the size */
 	if (dev->size < *f_pos)
 		dev->size = *f_pos;
-	mutex_unlock (&dev->lock);
+	mutex_unlock(&dev->mutex);
 	return count;
 
   nomem:
-	mutex_unlock (&dev->lock);
+	mutex_unlock(&dev->mutex);
 	return retval;
+}
+
+
+ssize_t scullc_write (struct file *filp, const char __user *buf, size_t count,
+                loff_t *f_pos)
+{
+	return scullc_do_write(filp, buf, count, f_pos, 0);
 }
 
 /*
  * The ioctl() implementation
  */
 
-long scullc_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
+long scullc_ioctl (struct file *filp,
+                 unsigned int cmd, unsigned long arg)
 {
 
 	int err = 0, ret = 0, tmp;
@@ -286,9 +309,9 @@ long scullc_ioctl (struct file *filp, unsigned int cmd, unsigned long arg)
 	 * "write" is reversed
 	 */
 	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok_wrapper(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err =  !access_ok_wrapper(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+		err =  !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 	if (err)
 		return -EFAULT;
 
@@ -392,6 +415,88 @@ loff_t scullc_llseek (struct file *filp, loff_t off, int whence)
 
 
 /*
+ * A simple asynchronous I/O implementation.
+ */
+
+struct async_work {
+	struct kiocb *iocb;
+	int result;
+	struct delayed_work work;
+};
+
+/*
+ * "Complete" an asynchronous operation.
+ */
+static void scullc_do_deferred_op(struct work_struct *p)
+{
+	struct async_work *stuff = container_of(p, struct async_work, work.work);
+	stuff->iocb->ki_complete(stuff->iocb, stuff->result, 0);
+	kfree(stuff);
+}
+
+
+static int scullc_defer_op(int write, struct kiocb *iocb, struct iov_iter *iter)
+{
+	struct async_work *stuff;
+	char			*buf;
+	size_t total;
+	int result;
+	loff_t *ppos;
+
+	total = iov_iter_count(iter);
+	ppos = &iocb->ki_pos;
+
+	buf = kmalloc(total, GFP_KERNEL);
+	if (unlikely(!buf))
+		return -ENOMEM;
+
+
+	/* Copy now while we can access the buffer */
+	if (write)
+	{
+		result = copy_from_iter(buf, total, iter);
+
+		result = scullc_do_write(iocb->ki_filp, buf, result, ppos, 1);
+	}
+	else
+	{
+		result = scullc_do_read(iocb->ki_filp, buf, total, ppos, 1);
+
+		result = copy_to_iter(buf , result, iter);
+	}
+
+	kfree(buf);
+
+	/* If this is a synchronous IOCB, we return our status now. */
+	if (is_sync_kiocb(iocb))
+		return result;
+
+	/* Otherwise defer the completion for a few milliseconds. */
+	stuff = kmalloc (sizeof (*stuff), GFP_KERNEL);
+	if (stuff == NULL)
+		return result; /* No memory, just complete now */
+	stuff->iocb = iocb;
+	stuff->result = result;
+	INIT_DELAYED_WORK(&stuff->work, scullc_do_deferred_op);
+	schedule_delayed_work(&stuff->work, HZ/100);
+	return -EIOCBQUEUED;
+}
+
+
+static ssize_t scullc_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	return scullc_defer_op(0, iocb, iter);
+}
+
+static ssize_t scullc_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	return scullc_defer_op(1, iocb, iter);
+}
+
+
+ 
+
+/*
  * The fops
  */
 
@@ -400,11 +505,11 @@ struct file_operations scullc_fops = {
 	.llseek =    scullc_llseek,
 	.read =	     scullc_read,
 	.write =     scullc_write,
-	.unlocked_ioctl = scullc_ioctl,
+	.unlocked_ioctl =     scullc_ioctl,
 	.open =	     scullc_open,
 	.release =   scullc_release,
-	.read_iter =  scull_read_iter,
-	.write_iter = scull_write_iter,
+	.read_iter =  scullc_read_iter,
+	.write_iter = scullc_write_iter,
 };
 
 int scullc_trim(struct scullc_dev *dev)
@@ -442,6 +547,7 @@ static void scullc_setup_cdev(struct scullc_dev *dev, int index)
     
 	cdev_init(&dev->cdev, &scullc_fops);
 	dev->cdev.owner = THIS_MODULE;
+	dev->cdev.ops = &scullc_fops;
 	err = cdev_add (&dev->cdev, devno, 1);
 	/* Fail gracefully if need be */
 	if (err)
@@ -485,19 +591,19 @@ int scullc_init(void)
 	for (i = 0; i < scullc_devs; i++) {
 		scullc_devices[i].quantum = scullc_quantum;
 		scullc_devices[i].qset = scullc_qset;
-		mutex_init (&scullc_devices[i].lock);
+		mutex_init (&scullc_devices[i].mutex);
 		scullc_setup_cdev(scullc_devices + i, i);
 	}
 
 	scullc_cache = kmem_cache_create("scullc", scullc_quantum,
-			0, SLAB_HWCACHE_ALIGN, NULL); /* no ctor/dtor */
+			0, SLAB_HWCACHE_ALIGN, NULL); /* no ctor */
 	if (!scullc_cache) {
 		scullc_cleanup();
 		return -ENOMEM;
 	}
 
 #ifdef SCULLC_USE_PROC /* only when available */
-	proc_create("scullcmem", 0, NULL, proc_ops_wrapper(&scullc_proc_ops,scullc_pops));
+	proc_create("scullcmem", 0, NULL, &scullc_read_mem_proc_fops);
 #endif
 	return 0; /* succeed */
 

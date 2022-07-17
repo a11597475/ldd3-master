@@ -32,7 +32,6 @@
 #include <linux/poll.h>
 
 #include <asm/io.h>
-#include <linux/semaphore.h>
 #include <asm/atomic.h>
 
 #include "shortprint.h"
@@ -69,7 +68,7 @@ MODULE_LICENSE("Dual BSD/GPL");
  * Forwards.
  */
 static void shortp_cleanup(void);
-static void shortp_timeout(struct timer_list *unused);
+static void shortp_timeout(struct timer_list* unused);
 
 /*
  * Input is managed through a simple circular buffer which, among other things,
@@ -80,7 +79,7 @@ static unsigned long shortp_in_buffer = 0;
 static unsigned long volatile shortp_in_head;
 static volatile unsigned long shortp_in_tail;
 DECLARE_WAIT_QUEUE_HEAD(shortp_in_queue);
-static struct timespec64 shortp_tv;  /* When the interrupt happened. */
+static struct timeval shortp_tv;  /* When the interrupt happened. */
 
 /*
  * Atomicly increment an index into shortp_in_buffer
@@ -101,14 +100,14 @@ static inline void shortp_incr_bp(volatile unsigned long *index, int delta)
  */
 static unsigned char *shortp_out_buffer = NULL;
 static volatile unsigned char *shortp_out_head, *shortp_out_tail;
-static struct mutex shortp_out_mutex;
+static struct semaphore shortp_out_sem;
 static DECLARE_WAIT_QUEUE_HEAD(shortp_out_queue);
 
 /*
  * Feeding the output queue to the device is handled by way of a
  * workqueue.
  */
-static void shortp_do_work(struct work_struct *work);
+static void shortp_do_work(struct work_struct *);
 static DECLARE_WORK(shortp_work, shortp_do_work);
 static struct workqueue_struct *shortp_workqueue;
 
@@ -274,11 +273,11 @@ static ssize_t shortp_write(struct file *filp, const char __user *buf, size_t co
 	int space, written = 0;
 	unsigned long flags;
 	/*
-	 * Take and hold the mutex for the entire duration of the operation.  The
+	 * Take and hold the semaphore for the entire duration of the operation.  The
 	 * consumer side ignores it, and it will keep other data from interleaving
 	 * with ours.
 	 */
-	if (mutex_lock_interruptible(&shortp_out_mutex))
+	if (down_interruptible(&shortp_out_sem))
 		return -ERESTARTSYS;
 	/*
 	 * Out with the data.
@@ -296,7 +295,7 @@ static ssize_t shortp_write(struct file *filp, const char __user *buf, size_t co
 		if ((space + written) > count)
 			space = count - written;
 		if (copy_from_user((char *) shortp_out_head, buf, space)) {
-			mutex_unlock(&shortp_out_mutex);
+			up(&shortp_out_sem);
 			return -EFAULT;
 		}
 		shortp_incr_out_bp(&shortp_out_head, space);
@@ -312,7 +311,7 @@ static ssize_t shortp_write(struct file *filp, const char __user *buf, size_t co
 
 out:
 	*f_pos += written;
-	mutex_unlock(&shortp_out_mutex);
+	up(&shortp_out_sem);
 	return written;
 }
 
@@ -322,7 +321,7 @@ out:
  */
 
 
-static void shortp_do_work(struct work_struct *work)
+static void shortp_do_work(struct work_struct *unused)
 {
 	int written;
 	unsigned long flags;
@@ -349,9 +348,9 @@ static void shortp_do_work(struct work_struct *work)
 	spin_unlock_irqrestore(&shortp_out_lock, flags);
 
 	/* Handle the "read" side operation */
-	written = sprintf((char *)shortp_in_head, "%08u.%09u\n",
+	written = sprintf((char *)shortp_in_head, "%08u.%06u\n",
 			(int)(shortp_tv.tv_sec % 100000000),
-			(int)(shortp_tv.tv_nsec));
+			(int)(shortp_tv.tv_usec));
 	shortp_incr_bp(&shortp_in_head, written);
 	wake_up_interruptible(&shortp_in_queue); /* awake any reading process */
 }
@@ -366,7 +365,7 @@ static irqreturn_t shortp_interrupt(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	/* Remember the time, and farm off the rest to the workqueue function */ 
-	ktime_get_real_ts64(&shortp_tv);
+	do_gettimeofday(&shortp_tv);
 	queue_work(shortp_workqueue, &shortp_work);
 	return IRQ_HANDLED;
 }
@@ -376,7 +375,7 @@ static irqreturn_t shortp_interrupt(int irq, void *dev_id)
  * things have gone wrong, however; printers can spend an awful long time
  * just thinking about things.
  */
-static void shortp_timeout(struct timer_list *unused)
+static void shortp_timeout(struct timer_list* unused)
 {
 	unsigned long flags;
 	unsigned char status;
@@ -456,7 +455,7 @@ static int shortp_init(void)
 	/* And the output buffer. */
 	shortp_out_buffer = (unsigned char *) __get_free_pages(GFP_KERNEL, 0);
 	shortp_out_head = shortp_out_tail = shortp_out_buffer;
-	mutex_init(&shortp_out_mutex);
+	sema_init(&shortp_out_sem, 1);
     
 	/* And the output info */
 	shortp_output_active = 0;

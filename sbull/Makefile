@@ -2,7 +2,7 @@
 #DEBUG = y
 
 
-# Add your debugging flag (or not) to CFLAGS
+# Add your debugging flag (or not) to EXTRA_CFLAGS
 ifeq ($(DEBUG),y)
   DEBFLAGS = -O -g -DSBULL_DEBUG # "-O" is needed to expand inlines
 else
@@ -10,8 +10,7 @@ else
 endif
 
 EXTRA_CFLAGS += $(DEBFLAGS)
-# for case RM_SIMPLE fall through
-EXTRA_CFLAGS += -I.. -Wno-implicit-fallthrough
+EXTRA_CFLAGS += -I..
 
 ifneq ($(KERNELRELEASE),)
 # call from kernel build system
@@ -31,7 +30,7 @@ endif
 
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions *.mod modules.order *.symvers
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions Module.symvers modules.order
 
 depend .depend dep:
 	$(CC) $(EXTRA_CFLAGS) -M *.c > .depend

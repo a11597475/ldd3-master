@@ -9,14 +9,13 @@ else
   DEBFLAGS = -O2
 endif
 
-LDDINC=$(PWD)/../include
 EXTRA_CFLAGS += $(DEBFLAGS) -I$(LDDINC)
 
 TARGET = sculld
 
 ifneq ($(KERNELRELEASE),)
 
-sculld-objs := main.o mmap.o scull-shared/scull-async.o
+sculld-objs := main.o mmap.o
 
 obj-m	:= sculld.o
 
@@ -26,9 +25,7 @@ KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD       := $(shell pwd)
 
 modules:
-	echo "Copying Module.symvers to resolve lddbus exports"
-#	cp $(PWD)/../lddbus/Module.symvers $(PWD)
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) KBUILD_EXTRA_SYMBOLS=$(PWD)/../lddbus/Module.symvers modules
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) LDDINC=$(PWD) modules
 
 endif
 
@@ -38,7 +35,7 @@ install:
 	install -c $(TARGET).o $(INSTALLDIR)
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions *.mod modules.order *.symvers scull-shared/scull-async.o
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions Module.symvers modules.order
 
 
 depend .depend dep:
