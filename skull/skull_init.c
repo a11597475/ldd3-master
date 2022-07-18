@@ -20,6 +20,7 @@
 
 /* jc: cleaned up, but not yet run for anything */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/moduleparam.h>
@@ -27,6 +28,7 @@
 #include <linux/kernel.h> /* printk */
 #include <linux/ioport.h>
 #include <linux/errno.h>
+#include <asm/system.h> /* cli(), *_flags */
 #include <linux/mm.h> /* vremap (2.0) */
 #include <asm/io.h> /* ioremap */
 

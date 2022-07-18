@@ -28,6 +28,7 @@
 #include <linux/kdev_t.h>
 #include <asm/page.h>
 #include <linux/cdev.h>
+#include <linux/version.h>
 
 #include <linux/device.h>
 
@@ -35,14 +36,6 @@ static int simple_major = 0;
 module_param(simple_major, int, 0);
 MODULE_AUTHOR("Jonathan Corbet");
 MODULE_LICENSE("Dual BSD/GPL");
-
-/*
- * Open the device; in fact, there's nothing to do here.
- */
-static int ldd_simple_open (struct inode *inode, struct file *filp)
-{
-	return 0;
-}
 
 
 /*
@@ -96,17 +89,22 @@ static int simple_remap_mmap(struct file *filp, struct vm_area_struct *vma)
 
 
 /*
- * The fault version.
+ * The nopage version.
  */
-int simple_vma_fault(struct vm_fault *vmf)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
+typedef int vm_fault_t;
+#endif
+
+static vm_fault_t simple_vma_nopage(struct vm_fault *vmf)
 {
 	struct page *pageptr;
-	unsigned long offset = vmf->vma->vm_pgoff << PAGE_SHIFT;
-	unsigned long physaddr = (unsigned long)(vmf->address - vmf->vma->vm_start) + offset;
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+	unsigned long physaddr = (unsigned long) vmf->address - vma->vm_start + offset;
 	unsigned long pageframe = physaddr >> PAGE_SHIFT;
 
 // Eventually remove these printks
-	printk (KERN_NOTICE "---- fault, off %lx phys %lx\n", offset, physaddr);
+	printk (KERN_NOTICE "---- Nopage, off %lx phys %lx\n", offset, physaddr);
 	printk (KERN_NOTICE "VA is %p\n", __va (physaddr));
 	printk (KERN_NOTICE "Page at %p\n", virt_to_page (__va (physaddr)));
 	if (!pfn_valid(pageframe))
@@ -115,25 +113,20 @@ int simple_vma_fault(struct vm_fault *vmf)
 	printk (KERN_NOTICE "page->index = %ld mapping %p\n", pageptr->index, pageptr->mapping);
 	printk (KERN_NOTICE "Page frame %ld\n", pageframe);
 	get_page(pageptr);
-        vmf->page = pageptr;
+	vmf->page = pageptr;
+
 	return 0;
 }
 
-static struct vm_operations_struct simple_fault_vm_ops = {
+static struct vm_operations_struct simple_nopage_vm_ops = {
 	.open =   simple_vma_open,
 	.close =  simple_vma_close,
-	.fault = simple_vma_fault,
+	.fault = simple_vma_nopage,
 };
 
-static int simple_fault_mmap(struct file *filp, struct vm_area_struct *vma)
+static int simple_nopage_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
-
-	if (offset >= __pa(high_memory) || (filp->f_flags & O_SYNC))
-		vma->vm_flags |= VM_IO;
-	vma->vm_flags |= (VM_DONTEXPAND | VM_DONTDUMP);
-
-	vma->vm_ops = &simple_fault_vm_ops;
+	vma->vm_ops = &simple_nopage_vm_ops;
 	simple_vma_open(vma);
 	return 0;
 }
@@ -149,7 +142,6 @@ static void simple_setup_cdev(struct cdev *dev, int minor,
     
 	cdev_init(dev, fops);
 	dev->owner = THIS_MODULE;
-	dev->ops = fops;
 	err = cdev_add (dev, devno, 1);
 	/* Fail gracefully if need be */
 	if (err)
@@ -163,17 +155,17 @@ static void simple_setup_cdev(struct cdev *dev, int minor,
 /* Device 0 uses remap_pfn_range */
 static struct file_operations simple_remap_ops = {
 	.owner   = THIS_MODULE,
-	.open    = ldd_simple_open,
+	.open    = simple_open,
 	.release = simple_release,
 	.mmap    = simple_remap_mmap,
 };
 
-/* Device 1 uses fault */
-static struct file_operations simple_fault_ops = {
+/* Device 1 uses nopage */
+static struct file_operations simple_nopage_ops = {
 	.owner   = THIS_MODULE,
-	.open    = ldd_simple_open,
+	.open    = simple_open,
 	.release = simple_release,
-	.mmap    = simple_fault_mmap,
+	.mmap    = simple_nopage_mmap,
 };
 
 #define MAX_SIMPLE_DEV 2
@@ -181,7 +173,7 @@ static struct file_operations simple_fault_ops = {
 #if 0
 static struct file_operations *simple_fops[MAX_SIMPLE_DEV] = {
 	&simple_remap_ops,
-	&simple_fault_ops,
+	&simple_nopage_ops,
 };
 #endif
 
@@ -215,7 +207,7 @@ static int simple_init(void)
 
 	/* Now set up two cdevs. */
 	simple_setup_cdev(SimpleDevs, 0, &simple_remap_ops);
-	simple_setup_cdev(SimpleDevs + 1, 1, &simple_fault_ops);
+	simple_setup_cdev(SimpleDevs + 1, 1, &simple_nopage_ops);
 	return 0;
 }
 

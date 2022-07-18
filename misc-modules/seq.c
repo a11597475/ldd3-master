@@ -1,7 +1,7 @@
 /*
  * Simple demonstration of the seq_file interface.
  *
- * $Id: seq.c,v 1.3 2004/09/26 07:02:43 gregkh Exp $
+ * seq.c,v 1.3 2004/09/26 07:02:43 gregkh Exp
  */
 
 #include <linux/init.h>
@@ -11,6 +11,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 
+#include "proc_ops_version.h"
 
 MODULE_AUTHOR("Jonathan Corbet");
 MODULE_LICENSE("Dual BSD/GPL");
@@ -39,7 +40,7 @@ static void *ct_seq_next(struct seq_file *s, void *v, loff_t *pos)
 
 static void ct_seq_stop(struct seq_file *s, void *v)
 {
-	kfree (v);
+	kfree(v);
 }
 
 /*
@@ -48,14 +49,14 @@ static void ct_seq_stop(struct seq_file *s, void *v)
 static int ct_seq_show(struct seq_file *s, void *v)
 {
 	loff_t *spos = (loff_t *) v;
-	seq_printf(s, "%Ld\n", *spos);
+	seq_printf(s, "%lld\n", *spos);
 	return 0;
 }
 
 /*
  * Tie them all together into a set of seq_operations.
  */
-static struct seq_operations ct_seq_ops = {
+static const struct seq_operations ct_seq_ops = {
 	.start = ct_seq_start,
 	.next  = ct_seq_next,
 	.stop  = ct_seq_stop,
@@ -77,15 +78,15 @@ static int ct_open(struct inode *inode, struct file *file)
  * The file operations structure contains our open function along with
  * set of the canned seq_ ops.
  */
-static struct file_operations ct_file_ops = {
+static const struct file_operations ct_file_ops = {
 	.owner   = THIS_MODULE,
 	.open    = ct_open,
 	.read    = seq_read,
 	.llseek  = seq_lseek,
 	.release = seq_release
 };
-	
-	
+
+
 /*
  * Module setup and teardown.
  */
@@ -94,7 +95,8 @@ static int ct_init(void)
 {
 	struct proc_dir_entry *entry;
 
-	entry = proc_create("sequence", 0, NULL, &ct_file_ops);
+	entry = proc_create("sequence", 0, NULL,
+	    proc_ops_wrapper(&ct_file_ops, ct_file_pops));
 	if (!entry)
 		return -ENOMEM;
 	return 0;

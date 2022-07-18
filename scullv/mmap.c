@@ -19,8 +19,9 @@
 
 #include <linux/mm.h>		/* everything */
 #include <linux/errno.h>	/* error codes */
-#include <linux/fs.h>
 #include <asm/pgtable.h>
+#include <linux/version.h>
+#include <linux/fs.h>
 
 #include "scullv.h"		/* local definitions */
 
@@ -56,16 +57,21 @@ void scullv_vma_close(struct vm_area_struct *vma)
  * pages from a multipage block: when they are unmapped, their count
  * is individually decreased, and would drop to 0.
  */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
+typedef int vm_fault_t;
+#endif
 
-int scullv_vma_fault(struct vm_fault *vmf)
+static vm_fault_t scullv_vma_nopage(struct vm_fault *vmf)
 {
 	unsigned long offset;
-	struct scullv_dev *ptr, *dev = vmf->vma->vm_private_data;
+	struct vm_area_struct *vma = vmf->vma;
+	struct scullv_dev *ptr, *dev = vma->vm_private_data;
 	struct page *page = NULL;
 	void *pageptr = NULL; /* default to "missing" */
+	vm_fault_t retval = VM_FAULT_NOPAGE;
 
 	mutex_lock(&dev->mutex);
-	offset = (unsigned long)(vmf->address - vmf->vma->vm_start) + (vmf->vma->vm_pgoff << PAGE_SHIFT);
+	offset = (unsigned long)(vmf->address - vma->vm_start) + (vma->vm_pgoff << PAGE_SHIFT);
 	if (offset >= dev->size) goto out; /* out of range */
 
 	/*
@@ -90,12 +96,12 @@ int scullv_vma_fault(struct vm_fault *vmf)
 
 	/* got it, now increment the count */
 	get_page(page);
+	vmf->page = page;
+	retval = 0;
+
   out:
 	mutex_unlock(&dev->mutex);
-	if (!page)
-		return VM_FAULT_SIGBUS;
-	vmf->page = page;
-	return 0;
+	return retval;
 }
 
 
@@ -103,7 +109,7 @@ int scullv_vma_fault(struct vm_fault *vmf)
 struct vm_operations_struct scullv_vm_ops = {
 	.open =     scullv_vma_open,
 	.close =    scullv_vma_close,
-	.fault =   scullv_vma_fault,
+	.fault =   scullv_vma_nopage,
 };
 
 
@@ -112,7 +118,6 @@ int scullv_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	/* don't do anything here: "nopage" will set up page table entries */
 	vma->vm_ops = &scullv_vm_ops;
-	vma->vm_flags |= (VM_DONTEXPAND | VM_DONTDUMP);
 	vma->vm_private_data = filp->private_data;
 	scullv_vma_open(vma);
 	return 0;

@@ -56,16 +56,16 @@ void scullc_vma_close(struct vm_area_struct *vma)
  * is individually decreased, and would drop to 0.
  */
 
-int scullc_vma_fault(struct vm_area_struct *vma,
-                                struct vm_fault *vmf)
+struct page *scullc_vma_nopage(struct vm_area_struct *vma,
+                                unsigned long address, int *type)
 {
 	unsigned long offset;
 	struct scullc_dev *ptr, *dev = vma->vm_private_data;
 	struct page *page = NOPAGE_SIGBUS;
 	void *pageptr = NULL; /* default to "missing" */
 
-	mutex_lock(&dev->mutex);
-	offset = (unsigned long)(vmf->virtual_address - vma->vm_start) + (vma->vm_pgoff << PAGE_SHIFT);
+	mutex_lock(&dev->lock);
+	offset = (address - vma->vm_start) + (vma->vm_pgoff << PAGE_SHIFT);
 	if (offset >= dev->size) goto out; /* out of range */
 
 	/*
@@ -82,14 +82,12 @@ int scullc_vma_fault(struct vm_area_struct *vma,
 	if (!pageptr) goto out; /* hole or end-of-file */
 
 	/* got it, now increment the count */
-	page = virt_to_page(pageptr);
 	get_page(page);
+	if (type)
+		*type = VM_FAULT_MINOR;
   out:
-	mutex_unlock(&dev->mutex);
-	if (!page)
-		return VM_FAULT_SIGBUS;
-	vmf->page = page;
-	return 0;
+	mutex_unlock(&dev->lock);
+	return page;
 }
 
 
@@ -97,7 +95,7 @@ int scullc_vma_fault(struct vm_area_struct *vma,
 struct vm_operations_struct scullc_vm_ops = {
 	.open =     scullc_vma_open,
 	.close =    scullc_vma_close,
-	.fault =   scullc_vma_fault,
+	.nopage =   scullc_vma_nopage,
 };
 
 
@@ -111,7 +109,6 @@ int scullc_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	/* don't do anything here: "nopage" will set up page table entries */
 	vma->vm_ops = &scullc_vm_ops;
-	vma->vm_flags |= (VM_DONTEXPAND | VM_DONTDUMP);
 	vma->vm_private_data = filp->private_data;
 	scullc_vma_open(vma);
 	return 0;

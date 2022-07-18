@@ -4,6 +4,10 @@
 # Makefile once again.
 # This conditional selects whether we are being included from the
 # kernel Makefile or not.
+
+LDDINC=$(PWD)/../include
+EXTRA_CFLAGS += -I$(LDDINC)
+
 ifeq ($(KERNELRELEASE),)
 
     # Assume the source tree is where the running kernel was built
@@ -19,14 +23,14 @@ modules_install:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules_install
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions Module.symvers modules.order
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions *.mod modules.order *.symvers
 
 .PHONY: modules modules_install clean
 
 else
     # called from kernel build system: just declare what our modules are
-    obj-m := hello.o hellop.o seq.o jit.o jiq.o sleepy.o complete.o \
-             silly.o kdatasize.o kdataalign.o
+    obj-m := hello.o hellop.o seq.o jiq.o sleepy.o complete.o \
+             silly.o faulty.o kdatasize.o kdataalign.o jit.o
 endif
 
 
