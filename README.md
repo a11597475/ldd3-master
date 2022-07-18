@@ -1,6 +1,6 @@
 ldd3: Linux Device Drivers 3 examples updated to work with recent kernels
 
-# About////
+# About//
 -----
 
 Linux Device Drivers 3 (http://lwn.net/Kernel/LDD3/) book is now a few years
